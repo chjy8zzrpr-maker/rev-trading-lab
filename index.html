@@ -173,8 +173,44 @@ function runAutoPaperCycle(){
   }
  }
 }
-async function refreshMarket(){ $('feedStatus').textContent='Refreshing public Solana pairs…';let successes=0;for(const t of TOKENS){try{const r=await fetch('https://api.dexscreener.com/token-pairs/v1/solana/'+t.mint,{cache:'no-store'});if(!r.ok)throw Error('HTTP '+r.status);const pairs=await r.json();const valid=(Array.isArray(pairs)?pairs:[]).filter(x=>x.chainId==='solana'&&(x.baseToken?.address===t.mint||x.quoteToken?.address===t.mint)&&Number(x.priceUsd)>0).sort((a,b)=>(b.liquidity?.usd||0)-(a.liquidity?.usd||0));if(!valid.length)throw Error('No verified Solana pair');const x=valid[0];const price=Number(x.priceUsd);market[t.symbol]={price,change24h:Number.isFinite(+x.priceChange?.h24)?+x.priceChange.h24:null,liquidity:+x.liquidity?.usd||0,volume:+x.volume?.h24||0,pair:x.url,base:x.baseToken?.address,quote:x.quoteToken?.address,updated:Date.now(),pairCreatedAt:x.pairCreatedAt||null,buys:Number.isFinite(+x.txns?.h24?.buys)?+x.txns.h24.buys:null,sells:Number.isFinite(+x.txns?.h24?.sells)?+x.txns.h24.sells:null,txCount:Number.isFinite(+x.txns?.h24?.buys)&&Number.isFinite(+x.txns?.h24?.sells)?(+x.txns.h24.buys + +x.txns.h24.sells):null};state.lastPrices[t.symbol]=price;if(state.positions[t.symbol])state.positions[t.symbol].lastPrice=price;successes++;}catch(e){market[t.symbol]={...(market[t.symbol]||{}),error:e.message};}}
- const bad=Object.values(market).filter(x=>x.error).length;$('feedStatus').textContent=`${successes}/4 pairs verified · refreshed ${new Date().toLocaleTimeString()}`;if(bad)log('Scout',`${bad} watchlist market request(s) unavailable or unverified; no price was fabricated.`);render();save();for(const [sym,pos] of Object.entries(state.positions)){const pct=netPosition(sym,pos)/Math.max(0.000001,pos.cost)*100;if(pct<=-8&&!profitAlerted[sym+'-stop']){profitAlerted[sym+'-stop']=true;log('Profit Taker',`${sym} is ${pct.toFixed(2)}% net: stop threshold reached. ${autoPaper?'Automatic paper exit will run on this refresh.':'Automatic exits are off; review manually.'}`);}for(const level of [15,30,50]){if(pct>=level&&!profitAlerted[sym+'-'+level]){profitAlerted[sym+'-'+level]=true;if(!autoPaper)log('Profit Taker',`${sym} crossed +${level}% net: review a 25% partial exit. Automatic exits are off.`);}}}runAutoPaperCycle();render();save();}
+async function refreshMarket(){
+ $('feedStatus').textContent='Refreshing Jupiter prices + Solana pair metrics…';
+ let successes=0,jupiterPrices={},jupiterError=null;
+ try{
+  const jr=await fetch('https://rev-trading-lab-api.chjy8zzrpr.workers.dev/prices',{cache:'no-store'});
+  if(!jr.ok)throw Error('Jupiter price API HTTP '+jr.status);
+  const payload=await jr.json();
+  if(payload.trading!=='disabled'||!payload.prices)throw Error('Unexpected price API response');
+  jupiterPrices=payload.prices;
+ }catch(e){jupiterError=e.message;}
+ for(const t of TOKENS){
+  try{
+   if(jupiterError)throw Error('Jupiter feed unavailable: '+jupiterError);
+   const jp=jupiterPrices[t.mint],jupiterPrice=Number(jp?.usdPrice);
+   if(!(jupiterPrice>0))throw Error('Jupiter has no current USD price for '+t.symbol);
+   const r=await fetch('https://api.dexscreener.com/token-pairs/v1/solana/'+t.mint,{cache:'no-store'});
+   if(!r.ok)throw Error('Pair metrics HTTP '+r.status);
+   const pairs=await r.json();
+   const valid=(Array.isArray(pairs)?pairs:[]).filter(x=>x.chainId==='solana'&&(x.baseToken?.address===t.mint||x.quoteToken?.address===t.mint)&&Number(x.priceUsd)>0).sort((a,b)=>(b.liquidity?.usd||0)-(a.liquidity?.usd||0));
+   if(!valid.length)throw Error('No verified Solana pair metrics');
+   const x=valid[0],price=jupiterPrice;
+   market[t.symbol]={price,priceSource:'Jupiter Price API V3',dexPrice:Number(x.priceUsd),change24h:Number.isFinite(+x.priceChange?.h24)?+x.priceChange.h24:null,liquidity:+x.liquidity?.usd||0,volume:+x.volume?.h24||0,pair:x.url,base:x.baseToken?.address,quote:x.quoteToken?.address,updated:Date.now(),pairCreatedAt:x.pairCreatedAt||null,buys:Number.isFinite(+x.txns?.h24?.buys)?+x.txns.h24.buys:null,sells:Number.isFinite(+x.txns?.h24?.sells)?+x.txns.h24.sells:null,txCount:Number.isFinite(+x.txns?.h24?.buys)&&Number.isFinite(+x.txns?.h24?.sells)?(+x.txns.h24.buys + +x.txns.h24.sells):null};
+   state.lastPrices[t.symbol]=price;
+   if(state.positions[t.symbol])state.positions[t.symbol].lastPrice=price;
+   successes++;
+  }catch(e){market[t.symbol]={...(market[t.symbol]||{}),error:e.message};}
+ }
+ const bad=TOKENS.length-successes;
+ $('feedStatus').textContent=`${successes}/4 Jupiter prices verified · refreshed ${new Date().toLocaleTimeString()}`;
+ if(bad)log('Scout',`${bad} watchlist price/market request(s) unavailable or unverified; no price was fabricated.`);
+ render();save();
+ for(const [sym,pos] of Object.entries(state.positions)){
+  const pct=netPosition(sym,pos)/Math.max(0.000001,pos.cost)*100;
+  if(pct<=-8&&!profitAlerted[sym+'-stop']){profitAlerted[sym+'-stop']=true;log('Profit Taker',`${sym} is ${pct.toFixed(2)}% net: stop threshold reached. ${autoPaper?'Automatic paper exit will run on this refresh.':'Automatic exits are off; review manually.'}`);}
+  for(const level of [15,30,50]){if(pct>=level&&!profitAlerted[sym+'-'+level]){profitAlerted[sym+'-'+level]=true;if(!autoPaper)log('Profit Taker',`${sym} crossed +${level}% net: review a 25% partial exit. Automatic exits are off.`);}}
+ }
+ runAutoPaperCycle();render();save();
+}
 function buy(sym){const t=TOKENS.find(x=>x.symbol===sym),m=market[sym],amount=+$('tradeAmount').value,cap=Math.min(5,+$('position').value||5),maxOpen=+$('maxopen').value||1;if(!m||Date.now()-m.updated>90000){log('Commander',`blocked ${sym} entry: no fresh verified quote.`);return;}if(state.halted||equity()-state.dayStartEquity<=-(+$('daily').value||1)||equity()-state.startingCash<=-5){state.halted=true;log('Commander','blocked entry: daily loss or drawdown limit reached.');render();return;}if(state.positions[sym]){log('Commander',`blocked ${sym}: an open position already exists.`);return;}if(Object.keys(state.positions).length>=maxOpen){log('Commander','blocked entry: maximum open positions reached.');return;}if(!(amount>0)||amount>cap||amount>state.cash){log('Commander',`blocked entry: order must be between $1 and ${money(Math.min(cap,state.cash))}.`);return;}const scout=scoutCheck(m),a=approvals[sym]||{};if(!scout.ok){log('Scout',`blocked ${sym}: ${scout.why}.`);return;}if(!a.age||!a.security||!a.chart){log('Commander',`blocked ${sym}: manual token-age, Bodyguard security, and Analyst chart confirmations are required.`);return;}const fee=amount*FEE,execPrice=m.price*(1+SLIPPAGE),qty=(amount-fee)/execPrice;state.cash-=amount;state.positions[sym]={qty,cost:amount,avgPrice:execPrice,lastPrice:m.price,mint:t.mint,openedAt:Date.now()};log('Sniper',`paper BUY ${sym}: ${qty.toLocaleString('en-US',{maximumFractionDigits:3})} units at modeled ${money(execPrice)}; total cash used ${money(amount)} incl. modeled fee.`);log('Commander','approved simulated entry after Scout filters, manual Bodyguard/Analyst confirmations, and risk checks. No transaction was sent.');save();render();}
 function sell(sym,fraction){const p=state.positions[sym],m=market[sym];if(!p||!m||!(m.price>0)){log('Profit Taker',`cannot simulate ${sym} exit: position or fresh quote unavailable.`);return;}const qty=p.qty*fraction,allocated=p.cost*fraction,proceeds=qty*m.price*(1-SLIPPAGE)*(1-FEE),realized=proceeds-allocated;state.cash+=proceeds;p.qty-=qty;p.cost-=allocated;state.trades.unshift({sym,qty,proceeds,cost:allocated,pnl:realized,at:Date.now()});if(p.qty<1e-10||fraction>=.999)delete state.positions[sym];log('Profit Taker',`paper SELL ${Math.round(fraction*100)}% ${sym}: proceeds ${money(proceeds)}, realized net P&L ${realized>=0?'+':''}${money(realized)} after modeled costs.`);save();render();}
 function resetPaper(){if(!confirm('Reset all paper positions, trade history and balance to $100? This cannot be undone.'))return;state={cash:100,startingCash:100,positions:{},trades:[],dayKey:new Date().toLocaleDateString(),dayStartEquity:100,halted:false,lastPrices:{}};save();log('Commander','paper account reset to $100 virtual cash by user request.');render();}
